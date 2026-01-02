@@ -15,13 +15,12 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TEAM = "Merchandising"
 MEMBERS = ["Ramakrishnan"]
-COMPONENTS = ["-- Select --","Images Update","Enrichment","MSRP Update","Meeting","Other",
-              "Leave"]
+COMPONENTS = ["-- Select --", "Images Update", "Enrichment", "MSRP Update", "Meeting", "Other", "Leave"]
 
 # ------------------ Reset keys ------------------
 RESET_KEYS = [
     "date_field", "member_field", "component_field",
-    "tickets_field", "banners_field",        # <-- added banners field here
+    "tickets_field", "sku_field",             # <-- replaced banners_field with sku_field
     "hours_field", "minutes_field", "comments_field"
 ]
 
@@ -118,9 +117,9 @@ with tab1:
         with c2:
             component = st.selectbox("Component", COMPONENTS, key="component_field")
 
-        # Tickets & Banners (frontend: keep banners; exclude sku, pages, codes)
+        # Tickets & SKU (frontend: keep sku; remove banners/pages/codes)
         tickets = st.number_input("Tickets", min_value=0, step=1, key="tickets_field")
-        banners = st.number_input("Banners", min_value=0, step=1, key="banners_field")
+        sku = st.number_input("SKU", min_value=0, step=1, key="sku_field")
 
         # Hours & Minutes
         c3, c4 = st.columns(2)
@@ -144,8 +143,7 @@ with tab1:
                 "member": member,
                 "component": component,
                 "tickets": int(tickets),
-                "banners": int(banners),          # <-- store banners
-                # Not inserting sku/pages/codes as per requirement
+                "sku": int(sku),               # <-- store sku
                 "duration": duration_minutes,
                 "comments": (comments or "").strip() or None
             }
@@ -171,11 +169,15 @@ with tab1:
         df1 = pd.DataFrame()
 
     if not df1.empty:
+        # ensure sku column exists for safe rendering even if older rows didn't have it
+        if "sku" not in df1.columns:
+            df1["sku"] = 0
+
         df1["date"] = pd.to_datetime(df1["date"], errors="coerce")
         df1 = df1[df1["team"] == TEAM]  # Show only entries for TEAM
 
-        # Drop unwanted columns: id, sku, pages, codes (KEEP banners)
-        drop_cols = [col for col in ["id", "sku", "pages", "codes"] if col in df1.columns]
+        # Drop unwanted columns: id, banners, pages, codes (KEEP sku)
+        drop_cols = [col for col in ["id", "banners", "pages", "codes"] if col in df1.columns]
         df1 = df1.drop(columns=drop_cols)
 
         st.subheader(f"Latest entries for {TEAM} (sorted by Date descending)")
@@ -194,6 +196,12 @@ with tab2:
     if vdf.empty:
         st.info("No data available")
     else:
+        # guards for columns
+        if "sku" not in vdf.columns:
+            vdf["sku"] = 0
+        if "tickets" not in vdf.columns:
+            vdf["tickets"] = 0
+
         vdf["date"] = pd.to_datetime(vdf["date"], errors="coerce")
         options, filtered_months, month_labels, previous_month_period, today, current_weekday, current_month, current_year = build_period_options_and_months(vdf["date"])
         choice = st.selectbox("Select period", options, key="tab2_period")
@@ -204,8 +212,9 @@ with tab2:
         if filtered.empty:
             st.info("No visuals for selected period.")
         else:
-            week_grouped = filtered.groupby("week")[["tickets"]].sum().reset_index().sort_values("week")
-            member_grouped = filtered.groupby("member")[["tickets"]].sum().reset_index()
+            # Aggregations
+            member_tickets = filtered.groupby("member", dropna=False)[["tickets"]].sum().reset_index()
+            member_sku = filtered.groupby("member", dropna=False)[["sku"]].sum().reset_index()
 
             def bar_with_labels(df, x_field, y_field, color, x_type="N", y_type="Q", x_title="", y_title=""):
                 bar = alt.Chart(df).mark_bar(color=color).encode(
@@ -221,36 +230,48 @@ with tab2:
 
             r1c1, r1c2 = st.columns(2)
             with r1c1:
-                st.subheader("Tickets by week")
-                chart = bar_with_labels(week_grouped, "week", "tickets", "steelblue",
-                                        x_type="O", y_type="Q", x_title="Week", y_title="Tickets")
-                st.altair_chart(chart, use_container_width=True)
-            with r1c2:
                 st.subheader("Tickets by member")
-                chart = bar_with_labels(member_grouped, "member", "tickets", "steelblue",
+                chart = bar_with_labels(member_tickets, "member", "tickets", "steelblue",
                                         x_type="N", y_type="Q", x_title="Member", y_title="Tickets")
                 st.altair_chart(chart, use_container_width=True)
+            with r1c2:
+                st.subheader("SKU by member")
+                chart = bar_with_labels(member_sku, "member", "sku", "#FF8C00",
+                                        x_type="N", y_type="Q", x_title="Member", y_title="SKU")
+                st.altair_chart(chart, use_container_width=True)
 
-            st.subheader("By Component (Sum of Tickets)")
-            component_grouped = filtered.groupby("component")[["tickets"]].sum().reset_index()
+            st.subheader("By Component (Sum of Tickets + SKU)")
+            component_grouped = filtered.groupby("component", dropna=False).agg(
+                tickets=("tickets", "sum"),
+                sku=("sku", "sum")
+            ).reset_index()
+
             component_grouped["component"] = component_grouped["component"].fillna("Unspecified")
             component_grouped.loc[component_grouped["component"].eq(""), "component"] = "Unspecified"
-            component_grouped = component_grouped.sort_values("tickets", ascending=False)
+
+            component_grouped["tickets"] = component_grouped["tickets"].fillna(0)
+            component_grouped["sku"] = component_grouped["sku"].fillna(0)
+            component_grouped["total"] = component_grouped["tickets"] + component_grouped["sku"]
+            component_grouped = component_grouped.sort_values("total", ascending=False)
 
             bar = alt.Chart(component_grouped).mark_bar(color="#4C78A8").encode(
                 x=alt.X("component:N", title="Component",
-                        sort=alt.SortField(field="tickets", order="descending")),
-                y=alt.Y("tickets:Q", title="Tickets")
+                        sort=alt.SortField(field="total", order="descending")),
+                y=alt.Y("total:Q", title="Total (Tickets + SKU)")
             ).properties(height=400)
+
             text = alt.Chart(component_grouped).mark_text(align="center", baseline="bottom", dy=-5, color="black").encode(
-                x=alt.X("component:N", sort=alt.SortField(field="tickets", order="descending")),
-                y=alt.Y("tickets:Q"),
-                text=alt.Text("tickets:Q")
+                x=alt.X("component:N", sort=alt.SortField(field="total", order="descending")),
+                y=alt.Y("total:Q"),
+                text=alt.Text("total:Q")
             )
+
             chart = (bar + text).encode(
                 tooltip=[
                     alt.Tooltip("component:N", title="Component"),
                     alt.Tooltip("tickets:Q", title="Tickets"),
+                    alt.Tooltip("sku:Q", title="SKU"),
+                    alt.Tooltip("total:Q", title="Total"),
                 ]
             )
             st.altair_chart(chart, use_container_width=True)
@@ -272,8 +293,8 @@ with tab3:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         # Derived hour views
         df["hours"] = df["duration"] / 60.0
-        df["utilization_hours"] = df.apply(lambda r: 0 if r["component"] in ["Break","Leave"] else r["hours"], axis=1)
-        df["occupancy_hours"] = df.apply(lambda r: 0 if r["component"] in ["Break","Leave","Meeting"] else r["hours"], axis=1)
+        df["utilization_hours"] = df.apply(lambda r: 0 if r["component"] in ["Break", "Leave"] else r["hours"], axis=1)
+        df["occupancy_hours"] = df.apply(lambda r: 0 if r["component"] in ["Break", "Leave", "Meeting"] else r["hours"], axis=1)
         df["leave_hours"] = df.apply(lambda r: r["hours"] if r["component"] == "Leave" else 0, axis=1)
 
         options, filtered_months, month_labels, previous_month_period, today, current_weekday, current_month, current_year = build_period_options_and_months(df["date"])
@@ -290,18 +311,18 @@ with tab3:
         else:
             # Member summary
             agg = period_df.groupby("member").agg(
-                utilized_hours=("utilization_hours","sum"),
-                occupied_hours=("occupancy_hours","sum"),
-                leave_hours=("leave_hours","sum")
+                utilized_hours=("utilization_hours", "sum"),
+                occupied_hours=("occupancy_hours", "sum"),
+                leave_hours=("leave_hours", "sum")
             ).reset_index()
 
             agg["total_hours"] = baseline_hours_period - agg["leave_hours"]
 
             agg["utilization_%"] = (
-                (agg["utilized_hours"]/agg["total_hours"]).where(agg["total_hours"] > 0, 0) * 100
+                (agg["utilized_hours"] / agg["total_hours"]).where(agg["total_hours"] > 0, 0) * 100
             ).round(1)
             agg["occupancy_%"] = (
-                (agg["occupied_hours"]/agg["total_hours"]).where(agg["total_hours"] > 0, 0) * 100
+                (agg["occupied_hours"] / agg["total_hours"]).where(agg["total_hours"] > 0, 0) * 100
             ).round(1)
 
             agg["utilized_hours"] = agg["utilized_hours"].round(1)
@@ -319,13 +340,13 @@ with tab3:
                 "occupancy_%": "Occupancy %"
             })
 
-            numeric_cols = ["Total Hours","Leave Hours","Utilized Hours","Occupied Hours","Utilization %","Occupancy %"]
+            numeric_cols = ["Total Hours", "Leave Hours", "Utilized Hours", "Occupied Hours", "Utilization %", "Occupancy %"]
             for col in numeric_cols:
                 merged_stats[col] = merged_stats[col].astype(float).round(1)
 
             st.subheader("Member Utilization & Occupancy")
             st.dataframe(
-                merged_stats[["Name","Total Hours","Leave Hours","Utilized Hours","Occupied Hours","Utilization %","Occupancy %"]],
+                merged_stats[["Name", "Total Hours", "Leave Hours", "Utilized Hours", "Occupied Hours", "Utilization %", "Occupancy %"]],
                 use_container_width=True
             )
 
@@ -352,7 +373,7 @@ with tab3:
 
             # Utilization by Component × Member (hours from raw duration; % of member's total recorded hours)
             st.subheader("Utilization by Component × Member")
-            util_df = period_df[~period_df["component"].isin(["Break","Leave"])].copy()
+            util_df = period_df[~period_df["component"].isin(["Break", "Leave"])].copy()
 
             comp_member_minutes = util_df.groupby(["component", "member"])["duration"].sum().reset_index()
             comp_member_minutes["hours"] = comp_member_minutes["duration"] / 60.0
