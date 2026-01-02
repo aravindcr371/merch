@@ -20,7 +20,7 @@ COMPONENTS = ["-- Select --","Images Update","Enrichment","MSRP Update","Meeting
 # ------------------ Reset keys ------------------
 RESET_KEYS = [
     "date_field", "member_field", "component_field",
-    "tickets_field", "skus_field",          # <-- use skus_field (replaces banners_field)
+    "tickets_field", "skus_field",          # skus replaces banners
     "hours_field", "minutes_field", "comments_field"
 ]
 
@@ -50,7 +50,7 @@ def build_period_options_and_months(df_dates: pd.Series):
     """
     Build period options:
       - Always include 'Current Week', 'Previous Week', 'Current Month', 'Previous Month'
-      - Include months present in the data (kept rule: months >= Nov 2024 if that’s how your data is organized)
+      - Include months present in the data (kept rule: months >= Nov 2024)
       - Exclude the computed 'Previous Month' from explicit month labels to avoid duplication
     """
     today = date.today()
@@ -117,9 +117,12 @@ with tab1:
         with c2:
             component = st.selectbox("Component", COMPONENTS, key="component_field")
 
-        # Tickets & SKUs (replace banners with skus)
-        tickets = st.number_input("Tickets", min_value=0, step=1, key="tickets_field")
-        skus = st.number_input("SKUs", min_value=0, step=1, key="skus_field")
+        # Tickets & SKUs side-by-side (replace banners with skus)
+        tcol1, tcol2 = st.columns(2)
+        with tcol1:
+            tickets = st.number_input("Tickets", min_value=0, step=1, key="tickets_field")
+        with tcol2:
+            skus = st.number_input("SKUs", min_value=0, step=1, key="skus_field")
 
         # Hours & Minutes
         c3, c4 = st.columns(2)
@@ -143,7 +146,7 @@ with tab1:
                 "member": member,
                 "component": component,
                 "tickets": int(tickets),
-                "skus": int(skus),            # <-- store skus (int8/BIGINT in DB)
+                "skus": int(skus),            # store skus (Postgres BIGINT/int8)
                 "duration": duration_minutes,
                 "comments": (comments or "").strip() or None
             }
@@ -203,6 +206,14 @@ with tab2:
             vdf["tickets"] = 0
 
         vdf["date"] = pd.to_datetime(vdf["date"], errors="coerce")
+        # ensure week exists for grouping (older rows safety)
+        if "week" not in vdf.columns or vdf["week"].isna().any():
+            try:
+                vdf["week"] = vdf["date"].dt.isocalendar().week
+            except Exception:
+                # fallback: fill missing week with 0 if date is invalid
+                vdf["week"] = vdf.get("week", 0).fillna(0)
+
         options, filtered_months, month_labels, previous_month_period, today, current_weekday, current_month, current_year = build_period_options_and_months(vdf["date"])
         choice = st.selectbox("Select period", options, key="tab2_period")
         weekdays = compute_weekdays_for_choice(choice, filtered_months, month_labels, previous_month_period,
@@ -212,11 +223,11 @@ with tab2:
         if filtered.empty:
             st.info("No visuals for selected period.")
         else:
-            # Aggregations
-            member_tickets = filtered.groupby("member", dropna=False)[["tickets"]].sum().reset_index()
-            member_skus = filtered.groupby("member", dropna=False)[["skus"]].sum().reset_index()
+            # Aggregations by week
+            week_tickets = filtered.groupby("week", dropna=False)[["tickets"]].sum().reset_index().sort_values("week")
+            week_skus = filtered.groupby("week", dropna=False)[["skus"]].sum().reset_index().sort_values("week")
 
-            def bar_with_labels(df, x_field, y_field, color, x_type="N", y_type="Q", x_title="", y_title=""):
+            def bar_with_labels(df, x_field, y_field, color, x_type="O", y_type="Q", x_title="", y_title=""):
                 bar = alt.Chart(df).mark_bar(color=color).encode(
                     x=alt.X(f"{x_field}:{x_type}", title=x_title),
                     y=alt.Y(f"{y_field}:{y_type}", title=y_title)
@@ -230,14 +241,14 @@ with tab2:
 
             r1c1, r1c2 = st.columns(2)
             with r1c1:
-                st.subheader("Tickets by member")
-                chart = bar_with_labels(member_tickets, "member", "tickets", "steelblue",
-                                        x_type="N", y_type="Q", x_title="Member", y_title="Tickets")
+                st.subheader("Tickets by week")
+                chart = bar_with_labels(week_tickets, "week", "tickets", "steelblue",
+                                        x_type="O", y_type="Q", x_title="Week", y_title="Tickets")
                 st.altair_chart(chart, use_container_width=True)
             with r1c2:
-                st.subheader("SKUs by member")
-                chart = bar_with_labels(member_skus, "member", "skus", "#FF8C00",
-                                        x_type="N", y_type="Q", x_title="Member", y_title="SKUs")
+                st.subheader("SKUs by week")
+                chart = bar_with_labels(week_skus, "week", "skus", "#FF8C00",
+                                        x_type="O", y_type="Q", x_title="Week", y_title="SKUs")
                 st.altair_chart(chart, use_container_width=True)
 
             st.subheader("By Component (Sum of Tickets + SKUs)")
